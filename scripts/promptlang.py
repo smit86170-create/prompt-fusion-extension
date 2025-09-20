@@ -1,6 +1,16 @@
 import gradio as gr
-from lib_prompt_fusion import hijacker, empty_cond, global_state, interpolation_tensor, prompt_parser as prompt_fusion_parser
-from modules import scripts, script_callbacks, prompt_parser, shared
+from lib_prompt_fusion import (
+    hijacker,
+    empty_cond,
+    global_state,
+    interpolation_tensor,
+    prompt_parser as prompt_fusion_parser,
+)
+from lib_prompt_fusion.prompt_parser_compat import (
+    convert_legacy_schedules,
+    requires_legacy_prompt_parser,
+)
+from modules import scripts, script_callbacks, prompt_parser, prompt_parser_old, shared
 
 
 fusion_hijacker_attribute = '__fusion_hijacker'
@@ -48,7 +58,17 @@ def _hijacked_get_learned_conditioning(model, prompts, total_steps, *args, origi
         empty_conditioning = []
 
     flattened_prompts, consecutive_ranges = _get_flattened_prompts(tensor_builders, empty_conditioning)
-    flattened_schedules = original_function(model, flattened_prompts, total_steps, *args, **kwargs)
+
+    if requires_legacy_prompt_parser(flattened_prompts):
+        flattened_schedules = _get_flattened_prompts_with_legacy_parser(
+            model,
+            flattened_prompts,
+            total_steps,
+            args,
+            kwargs,
+        )
+    else:
+        flattened_schedules = original_function(model, flattened_prompts, total_steps, *args, **kwargs)
 
     if isinstance(flattened_schedules[0][0].cond, dict): # sdxl
         CondWrapper = interpolation_tensor.DictCondWrapper
@@ -116,6 +136,34 @@ def _get_flattened_prompts(tensor_builders, flattened_prompts=None):
         consecutive_ranges.append(len(flattened_prompts))
 
     return flattened_prompts, consecutive_ranges
+
+
+_LEGACY_OPTIONAL_ARG_NAMES = ('hires_steps', 'use_old_scheduling')
+
+
+def _get_flattened_prompts_with_legacy_parser(model, prompts, total_steps, args, kwargs):
+    legacy_kwargs = _build_legacy_kwargs(args, kwargs)
+    legacy_schedules = prompt_parser_old.get_learned_conditioning(
+        model,
+        prompts,
+        total_steps,
+        **legacy_kwargs,
+    )
+
+    return convert_legacy_schedules(legacy_schedules)
+
+
+def _build_legacy_kwargs(args, kwargs):
+    legacy_kwargs = {}
+
+    for name, value in zip(_LEGACY_OPTIONAL_ARG_NAMES, args):
+        legacy_kwargs[name] = value
+
+    for name in _LEGACY_OPTIONAL_ARG_NAMES:
+        if name in kwargs:
+            legacy_kwargs[name] = kwargs[name]
+
+    return legacy_kwargs
 
 
 def _sample_tensor_schedules(tensor, steps, is_hires):
