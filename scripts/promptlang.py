@@ -8,6 +8,7 @@ from lib_prompt_fusion import (
 )
 from lib_prompt_fusion.prompt_parser_compat import (
     convert_legacy_schedules,
+    normalize_conditioning_arguments,
     requires_legacy_prompt_parser,
 )
 from modules import scripts, script_callbacks, prompt_parser, prompt_parser_old, shared
@@ -36,7 +37,12 @@ def _hijacked_get_learned_conditioning(model, prompts, total_steps, *args, origi
     if not shared.opts.prompt_fusion_enabled:
         return original_function(model, prompts, total_steps, *args, **kwargs)
 
-    hires_steps, use_old_scheduling, *_ = args if args else (None, True)
+    (
+        hires_steps,
+        use_old_scheduling,
+        normalized_args,
+        normalized_kwargs,
+    ) = normalize_conditioning_arguments(args, kwargs)
     is_hires = hires_steps is not None
     if is_hires:
         real_total_steps = hires_steps
@@ -64,11 +70,17 @@ def _hijacked_get_learned_conditioning(model, prompts, total_steps, *args, origi
             model,
             flattened_prompts,
             total_steps,
-            args,
-            kwargs,
+            normalized_args,
+            normalized_kwargs,
         )
     else:
-        flattened_schedules = original_function(model, flattened_prompts, total_steps, *args, **kwargs)
+        flattened_schedules = original_function(
+            model,
+            flattened_prompts,
+            total_steps,
+            *normalized_args,
+            **normalized_kwargs,
+        )
 
     if isinstance(flattened_schedules[0][0].cond, dict): # sdxl
         CondWrapper = interpolation_tensor.DictCondWrapper
