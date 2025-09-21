@@ -1,5 +1,12 @@
+import os
+import sys
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'AUTOMATIC1111', 'stable-diffusion-webui'))
+
 from lib_prompt_fusion.prompt_parser import parse_prompt
 from lib_prompt_fusion.interpolation_tensor import InterpolationTensorBuilder
+from lib_prompt_fusion.prompt_parser_compat import convert_legacy_schedules, requires_legacy_prompt_parser
+from modules import prompt_parser, prompt_parser_old
 
 
 def run_functional_tests(total_steps=100):
@@ -14,6 +21,77 @@ def run_functional_tests(total_steps=100):
             assert set(actual) == expected, f"{actual} != {expected}"
         else:
             assert len(actual) == 1 and actual[0] == expected, f"'{actual[0]}' != '{expected}'"
+
+
+def test_requires_legacy_parser_for_prompt_fusion_tokens():
+    prompts = [
+        '[[a:b:1,2]:b:]',
+        '[top level:interpolatin:lik a pro:1,3,5:linear]',
+        '[a:b:c::mean]',
+        '[(nested attention:2.0):abc:,]',
+    ]
+
+    for prompt in prompts:
+        assert requires_legacy_prompt_parser([prompt]), prompt
+
+    assert not requires_legacy_prompt_parser(['plain prompt'])
+
+
+def test_prompt_fusion_interpolation_collapses_in_new_parser():
+    prompt = '[[a:b:1,2]:b:]'
+
+    schedule = prompt_parser.get_learned_conditioning_prompt_schedules([prompt], 10)[0]
+    assert len(schedule) == 1
+
+
+def test_convert_legacy_schedules_preserves_segments():
+    legacy_schedule = [
+        [
+            prompt_parser_old.ScheduledPromptConditioning(end_at_step=3, cond='cond-a'),
+            prompt_parser_old.ScheduledPromptConditioning(end_at_step=10, cond='cond-b'),
+        ]
+    ]
+
+    converted = convert_legacy_schedules(legacy_schedule)
+
+    assert len(converted) == 1
+    assert all(isinstance(s, prompt_parser.ScheduledPromptConditioning) for s in converted[0])
+    assert [s.cond for s in converted[0]] == ['cond-a', 'cond-b']
+    assert [s.end_at_step for s in converted[0]] == [3, 10]
+
+
+def test_attention_interpolation_prompts_use_legacy_parser():
+    expr = parse_prompt('(cats:0.5, 1.5)')
+    tensor_builder = InterpolationTensorBuilder()
+    expr.extend_tensor(
+        tensor_builder,
+        (0, 20),
+        20,
+        dict(),
+        is_hires=False,
+        use_old_scheduling=False,
+    )
+
+    prompts = tensor_builder.get_prompt_database()
+    assert len(prompts) == 1
+    prompt = prompts[0]
+
+    assert requires_legacy_prompt_parser([prompt])
+
+    prompt_schedule = prompt_parser_old.get_learned_conditioning_prompt_schedules([prompt], 20)[0]
+    assert len(prompt_schedule) > 1
+
+    legacy_schedule = [
+        [
+            prompt_parser_old.ScheduledPromptConditioning(end_at_step=step, cond=text)
+            for step, text in prompt_schedule
+        ]
+    ]
+
+    converted = convert_legacy_schedules(legacy_schedule)
+
+    assert len(converted[0]) == len(prompt_schedule)
+    assert [s.end_at_step for s in converted[0]] == [step for step, _ in prompt_schedule]
 
 
 functional_parse_test_cases = [
@@ -102,3 +180,7 @@ functional_parse_test_cases = [
 
 def run_tests():
     run_functional_tests()
+    test_requires_legacy_parser_for_prompt_fusion_tokens()
+    test_prompt_fusion_interpolation_collapses_in_new_parser()
+    test_convert_legacy_schedules_preserves_segments()
+    test_attention_interpolation_prompts_use_legacy_parser()
